@@ -1,8 +1,9 @@
+import "./role-permissions.css";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MapPin, Plus, Search, Trash2, Pencil, Check, X, Download, Upload, LocateFixed, Layers, MousePointer2, Undo2 } from "lucide-react";
 import booleanPointInPolygon from "@turf/boolean-point-in-polygon";
-import { featureCollection, point, polygon } from "@turf/helpers";
-import { deleteArea, loadAreas, replaceAllAreas, saveArea } from "./db";
+import { point, polygon } from "@turf/helpers";
+import { deleteArea, getUserRole, loadAreas, replaceAllAreas, saveArea, type UserRole } from "./db";
 import type { Area, Point, SearchResult } from "./types";
 import { getSession, isAuthConfigured, signIn, signOut, type AuthSession } from "./auth";
 
@@ -19,6 +20,7 @@ function MapWorkspace({ session, onSignOut }: { session: AuthSession; onSignOut:
   const drawModeRef = useRef(false);
   const geocoderRef = useRef<any>(null);
   const [sdkReady, setSdkReady] = useState(false);
+  const [role, setRole] = useState<UserRole | null>(null);
   const [areas, setAreas] = useState<Area[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [drawMode, setDrawMode] = useState(false);
@@ -34,6 +36,23 @@ function MapWorkspace({ session, onSignOut }: { session: AuthSession; onSignOut:
   const [editName, setEditName] = useState("");
 
   const selectedArea = areas.find(a => a.id === selectedId) ?? null;
+  const canCreate = role === "admin" || role === "editor";
+  const canImport = role === "admin";
+  const canManageArea = (area: Area) => role === "admin" || (role === "editor" && area.userId === session.user.id);
+  const roleLabel = role === "admin" ? "관리자" : role === "editor" ? "일반 사용자" : role === "viewer" ? "게스트 · 조회 전용" : "권한 확인 중";
+
+  useEffect(() => {
+    let cancelled = false;
+    getUserRole(session).then(value => {
+      if (!cancelled) setRole(value);
+    }).catch(error => {
+      if (!cancelled) {
+        setRole("viewer"); // 권한 확인 실패 시 편집 권한을 주지 않습니다.
+        setNotice(error instanceof Error ? `권한 확인 실패: ${error.message}` : "권한 확인에 실패했습니다. 조회 전용으로 표시합니다.");
+      }
+    });
+    return () => { cancelled = true; };
+  }, [session]);
 
   const paintArea = useCallback((area: Area) => {
     if (!mapRef.current || !window.kakao) return;
@@ -131,6 +150,7 @@ function MapWorkspace({ session, onSignOut }: { session: AuthSession; onSignOut:
   }, [drawMode]);
 
   const startDrawing = () => {
+    if (!canCreate) { setNotice("게스트 계정은 폴리곤을 생성할 수 없습니다."); return; }
     draftPointsRef.current = [];
     setDraftPoints([]);
     setAreaName("");
@@ -164,12 +184,13 @@ function MapWorkspace({ session, onSignOut }: { session: AuthSession; onSignOut:
   };
 
   const finishDrawing = async () => {
+    if (!canCreate) { setNotice("게스트 계정은 폴리곤을 저장할 수 없습니다."); return; }
     const pts = draftPointsRef.current;
     if (pts.length < 3) { setNotice("폴리곤은 꼭짓점이 최소 3개 필요합니다."); return; }
     const name = areaName.trim() || `새 영역 ${areas.length + 1}`;
     const area: Area = {
       id: crypto.randomUUID(), name, color: areaColor,
-      description: areaDescription.trim(), points: pts, createdAt: Date.now()
+      description: areaDescription.trim(), points: pts, createdAt: Date.now(), userId: session.user.id
     };
     await saveArea(area, session);
     const next = [...areas, area];
@@ -219,6 +240,7 @@ function MapWorkspace({ session, onSignOut }: { session: AuthSession; onSignOut:
   };
 
   const removeArea = async (area: Area) => {
+    if (!canManageArea(area)) { setNotice("이 영역을 삭제할 권한이 없습니다."); return; }
     if (!window.confirm(`'${area.name}' 영역을 삭제할까요?`)) return;
     await deleteArea(area.id, session);
     setAreas(prev => prev.filter(a => a.id !== area.id));
@@ -227,6 +249,7 @@ function MapWorkspace({ session, onSignOut }: { session: AuthSession; onSignOut:
   };
 
   const renameArea = async (area: Area) => {
+    if (!canManageArea(area)) { setNotice("이 영역을 수정할 권한이 없습니다."); return; }
     const name = editName.trim();
     if (!name) return;
     const updated = { ...area, name };
@@ -246,6 +269,7 @@ function MapWorkspace({ session, onSignOut }: { session: AuthSession; onSignOut:
 
   const importJson = async (file?: File) => {
     if (!file) return;
+    if (!canImport) { setNotice("백업 파일 불러오기는 관리자 계정만 사용할 수 있습니다."); return; }
     try {
       const parsed = JSON.parse(await file.text());
       const incoming = Array.isArray(parsed) ? parsed : parsed.areas;
@@ -256,7 +280,7 @@ function MapWorkspace({ session, onSignOut }: { session: AuthSession; onSignOut:
       )) throw new Error("invalid");
       if (!window.confirm(`${incoming.length}개 영역으로 현재 데이터를 교체할까요?`)) return;
       await replaceAllAreas(incoming, session);
-      setAreas(incoming); setSelectedId(null);
+      setAreas(incoming.map((area: Area) => ({ ...area, userId: area.userId || session.user.id }))); setSelectedId(null);
       setNotice(`${incoming.length}개 영역을 불러왔습니다.`);
     } catch { setNotice("올바른 백업 JSON 파일이 아닙니다."); }
   };
@@ -275,10 +299,11 @@ function MapWorkspace({ session, onSignOut }: { session: AuthSession; onSignOut:
       <header className="topbar">
         <div className="brand"><div className="brand-icon"><Layers size={20}/></div><div><strong>Map Area Manager</strong><small>개인용 지도 영역 관리</small></div></div>
         <div className="top-actions">
+          <span className={`role-badge ${role === "viewer" ? "viewer" : ""}`}>{roleLabel}</span>
           <span className="signed-in">{session.user.email}</span>
           <button className="button subtle" onClick={onSignOut}>로그아웃</button>
           <button className="button subtle" onClick={exportJson}><Download size={16}/> 백업</button>
-          <label className="button subtle file-button"><Upload size={16}/> 불러오기<input type="file" accept=".json,application/json" onChange={e => importJson(e.target.files?.[0])}/></label>
+          {canImport && <label className="button subtle file-button"><Upload size={16}/> 불러오기<input type="file" accept=".json,application/json" onChange={e => importJson(e.target.files?.[0])}/></label>}
         </div>
       </header>
 
@@ -299,8 +324,9 @@ function MapWorkspace({ session, onSignOut }: { session: AuthSession; onSignOut:
           </section>
 
           <section className="areas-section">
-            <div className="section-heading"><h2>저장된 영역 <span className="count">{areas.length}</span></h2><button className="icon-button" onClick={startDrawing} title="새 영역 그리기"><Plus size={19}/></button></div>
-            <button className="button primary full" onClick={startDrawing}><Plus size={17}/> 새 폴리곤 그리기</button>
+            <div className="section-heading"><h2>저장된 영역 <span className="count">{areas.length}</span></h2>{canCreate && <button className="icon-button" onClick={startDrawing} title="새 영역 그리기"><Plus size={19}/></button>}</div>
+            {role === "viewer" && <div className="readonly-notice"><strong>게스트 계정 · 조회 전용</strong><span>모든 폴리곤을 조회할 수 있지만 새 영역 생성, 수정 및 삭제는 할 수 없습니다.</span></div>}
+            {canCreate && <button className="button primary full" onClick={startDrawing}><Plus size={17}/> 새 폴리곤 그리기</button>}
             {drawMode && <div className="draw-panel">
               <div className="draw-title"><MousePointer2 size={16}/> 영역 그리는 중</div>
               <p>지도에서 꼭짓점을 클릭하세요. {draftPoints.length}개 입력됨</p>
@@ -314,17 +340,17 @@ function MapWorkspace({ session, onSignOut }: { session: AuthSession; onSignOut:
               </div>
             </div>}
             <div className="area-list">
-              {!areas.length && <div className="empty-state"><div className="empty-icon"><Layers size={24}/></div><strong>저장된 영역이 없습니다</strong><span>새 폴리곤 그리기로 첫 영역을 만들어 보세요.</span></div>}
+              {!areas.length && <div className="empty-state"><div className="empty-icon"><Layers size={24}/></div><strong>저장된 영역이 없습니다</strong><span>{canCreate ? "새 폴리곤 그리기로 첫 영역을 만들어 보세요." : "조회할 수 있는 저장된 영역이 없습니다."}</span></div>}
               {areas.map(area => <div key={area.id} className={`area-card ${selectedId===area.id?"active":""}`}>
                 <button className="area-main" onClick={() => focusArea(area)}>
                   <i className="area-swatch" style={{background:area.color}}/>
                   <span className="area-text"><strong>{area.name}</strong><small>{area.points.length}개 꼭짓점{area.description ? ` · ${area.description}` : ""}</small></span>
                 </button>
-                <div className="area-actions">
+                {canManageArea(area) && <div className="area-actions">
                   <button className="icon-button small" title="이름 변경" onClick={() => {setEditingId(area.id);setEditName(area.name);}}><Pencil size={14}/></button>
                   <button className="icon-button small danger" title="삭제" onClick={() => removeArea(area)}><Trash2 size={14}/></button>
-                </div>
-                {editingId===area.id && <div className="rename-row"><input value={editName} onChange={e=>setEditName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&renameArea(area)}/><button onClick={()=>renameArea(area)}><Check size={15}/></button><button onClick={()=>setEditingId(null)}><X size={15}/></button></div>}
+                </div>}
+                {canManageArea(area) && editingId===area.id && <div className="rename-row"><input value={editName} onChange={e=>setEditName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&renameArea(area)}/><button onClick={()=>renameArea(area)}><Check size={15}/></button><button onClick={()=>setEditingId(null)}><X size={15}/></button></div>}
               </div>)}
             </div>
           </section>
@@ -332,7 +358,7 @@ function MapWorkspace({ session, onSignOut }: { session: AuthSession; onSignOut:
         </aside>
         <section className="map-panel">
           <div className="map-toolbar">
-            <div><strong>지도</strong><span>서울 중심으로 시작합니다</span></div>
+            <div><strong>지도</strong><span>{role === "viewer" ? "조회 전용 모드입니다" : "서울 중심으로 시작합니다"}</span></div>
             {drawMode && <span className="drawing-indicator"><span/> 그리기 모드 · 지도 클릭으로 꼭짓점 추가</span>}
           </div>
           <div ref={mapEl} id="map" />
