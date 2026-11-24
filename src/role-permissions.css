@@ -1,0 +1,7 @@
+
+.role-badge{align-self:center;border:1px solid #dbe7f5;background:#f1f7ff;color:#2869aa;border-radius:20px;padding:5px 9px;font-size:10px;font-weight:700;white-space:nowrap}
+.role-badge.viewer{border-color:#e3e7ed;background:#f3f5f8;color:#5e6b7c}
+.readonly-notice{display:flex;flex-direction:column;gap:5px;padding:11px 12px;margin:0 0 12px;border:1px solid #e1e7ee;background:#f7f9fc;border-radius:8px}
+.readonly-notice strong{font-size:11px;color:#45566d}
+.readonly-notice span{font-size:10px;line-height:1.55;color:#778599}
+@media(max-width:620px){.top-actions{gap:5px}.role-badge{font-size:9px;padding:4px 6px}.signed-in{display:none}}
