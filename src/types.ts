@@ -1,6 +1,7 @@
 export type Point = [number, number]; // [longitude, latitude]
 export interface Area {
   id: string;
+  userId: string;
   name: string;
   color: string;
   description: string;
